@@ -30,4 +30,19 @@ class KeepAlive {
       await _channel.invokeMethod('stop').timeout(_callTimeout);
     } catch (_) {}
   }
+
+  /// Media-playback foreground service: keeps audio alive when the app is
+  /// minimized during playback.
+  static Future<void> startPlayback(String title) async {
+    try {
+      await _channel
+          .invokeMethod('startPlayback', {'title': title}).timeout(_callTimeout);
+    } catch (_) {}
+  }
+
+  static Future<void> stopPlayback() async {
+    try {
+      await _channel.invokeMethod('stopPlayback').timeout(_callTimeout);
+    } catch (_) {}
+  }
 }

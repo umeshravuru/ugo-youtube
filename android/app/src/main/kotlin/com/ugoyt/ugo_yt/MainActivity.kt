@@ -54,6 +54,14 @@ class MainActivity : FlutterActivity() {
                     DownloadService.stop(this)
                     result.success(null)
                 }
+                "startPlayback" -> {
+                    PlaybackService.start(this, call.argument<String>("title") ?: "Playing")
+                    result.success(null)
+                }
+                "stopPlayback" -> {
+                    PlaybackService.stop(this)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }

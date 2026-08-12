@@ -9,10 +9,8 @@ import '../util/url_parse.dart';
 import 'keepalive.dart';
 import 'library_store.dart';
 import 'mux.dart';
+import 'segmented_downloader.dart';
 import 'stream_pick.dart';
-
-/// Thrown internally when the user cancels an in-flight download.
-class _Cancelled implements Exception {}
 
 /// Serial download queue: extract → download stream(s) → mux → finalize.
 /// Runs in the main isolate; the native foreground service (via [KeepAlive])
@@ -39,6 +37,17 @@ class DownloadManager {
   final Set<String> _cancelRequested = {};
   bool _running = false;
   final YoutubeExplode _yt = YoutubeExplode();
+  final SegmentedDownloader _segmented = SegmentedDownloader();
+
+  /// Query several innertube clients and union their streams. The library's
+  /// default is a single client with a silent fallback to the TV client,
+  /// which returns a thin muxed-only manifest — that silently downgraded
+  /// downloads to 360p whenever the primary client hiccuped.
+  static final List<YoutubeApiClient> _ytClients = [
+    YoutubeApiClient.androidVr,
+    YoutubeApiClient.ios,
+    YoutubeApiClient.androidSdkless,
+  ];
 
   /// Entry point for anything shared to the app (or pasted manually).
   Future<void> enqueueFromSharedText(String text) async {
@@ -107,7 +116,7 @@ class DownloadManager {
         if (item == null) continue;
         try {
           await _download(item);
-        } on _Cancelled {
+        } on DownloadCancelled {
           _cancelRequested.remove(id);
           // Item was removed by cancelAndRemove; nothing to update.
         } catch (e) {
@@ -126,7 +135,7 @@ class DownloadManager {
   }
 
   void _checkpoint(String id) {
-    if (_cancelRequested.contains(id)) throw _Cancelled();
+    if (_cancelRequested.contains(id)) throw DownloadCancelled();
   }
 
   Future<void> _download(VideoItem item) async {
@@ -159,9 +168,23 @@ class DownloadManager {
     } catch (_) {}
 
     _checkpoint(item.id);
-    final manifest =
-        await _yt.videos.streamsClient.getManifest(id).timeout(_manifestTimeout);
-    final pick = pickStreams(manifest);
+    // YouTube intermittently returns thin manifests with no adaptive
+    // streams (only ~360p muxed). Re-rolling the request a couple of times
+    // usually gets a full one — worth it for the quality difference.
+    var pick = pickStreams(await _yt.videos.streamsClient
+        .getManifest(id, ytClients: _ytClients)
+        .timeout(_manifestTimeout));
+    for (var i = 0; i < 2 && !pick.isAdaptive; i++) {
+      _checkpoint(item.id);
+      await Future<void>.delayed(const Duration(seconds: 2));
+      try {
+        pick = pickStreams(await _yt.videos.streamsClient
+            .getManifest(id, ytClients: _ytClients)
+            .timeout(_manifestTimeout));
+      } catch (_) {
+        break; // keep whatever we already have
+      }
+    }
 
     item.status = VideoStatus.downloading;
     item.progress = 0;
@@ -202,8 +225,8 @@ class DownloadManager {
         _reportProgress(item, total == 0 ? 0 : received / total);
       }
 
-      await _downloadStream(item.id, pick.video!, vPart, onChunk);
-      await _downloadStream(item.id, pick.audio!, aPart, onChunk);
+      await _downloadSegmented(item, pick.video!, vPart, onChunk);
+      await _downloadSegmented(item, pick.audio!, aPart, onChunk);
 
       item.status = VideoStatus.muxing;
       store.upsert(item);
@@ -221,10 +244,10 @@ class DownloadManager {
         try {
           await out.delete();
         } catch (_) {}
-        throw _Cancelled();
+        throw DownloadCancelled();
       }
       return out;
-    } on _Cancelled {
+    } on DownloadCancelled {
       rethrow;
     } catch (e) {
       return null;
@@ -260,6 +283,38 @@ class DownloadManager {
     }
   }
 
+  /// Segmented download with automatic retry and byte-exact resume —
+  /// survives googlevideo's mid-transfer stalls without restarting.
+  Future<void> _downloadSegmented(
+    VideoItem item,
+    StreamInfo info,
+    File target,
+    void Function(int bytes) onChunk,
+  ) {
+    return _segmented.download(
+      url: info.url,
+      totalBytes: info.size.totalBytes,
+      target: target,
+      onChunk: onChunk,
+      isCancelled: () => _cancelRequested.contains(item.id),
+      refreshUrl: () => _refreshStreamUrl(item.id, info.tag),
+    );
+  }
+
+  /// Re-extracts the manifest to get a fresh URL for the same stream (tag)
+  /// when the old one expires mid-download.
+  Future<Uri?> _refreshStreamUrl(String videoId, int tag) async {
+    try {
+      final manifest = await _yt.videos.streamsClient
+          .getManifest(VideoId(videoId), ytClients: _ytClients)
+          .timeout(_manifestTimeout);
+      for (final s in manifest.streams) {
+        if (s.tag == tag) return s.url;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   /// Explicit-subscription download loop. Completion is driven only by our
   /// own completer (done / error / cancel / inactivity watchdog), so a
   /// wedged source stream or slow library teardown can never block the
@@ -288,7 +343,7 @@ class DownloadManager {
       (chunk) {
         if (done.isCompleted) return;
         if (_cancelRequested.contains(itemId)) {
-          done.completeError(_Cancelled());
+          done.completeError(DownloadCancelled());
           return;
         }
         armWatchdog();
@@ -358,5 +413,6 @@ class DownloadManager {
 
   void dispose() {
     _yt.close();
+    _segmented.close();
   }
 }

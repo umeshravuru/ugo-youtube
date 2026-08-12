@@ -1,13 +1,14 @@
 name: ugo_yt
 description: "A new Flutter project."
 publish_to: 'none'
-version: 1.0.1+2
+version: 1.1.0+3
 
 environment:
   sdk: ^3.13.0
 
 dependencies:
   chewie: ^1.14.1
+  crypto: ^3.0.7
   ffmpeg_kit_flutter_new_min: ^3.6.2
   flutter:
     sdk: flutter

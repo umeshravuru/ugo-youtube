@@ -6,6 +6,7 @@ import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/video_item.dart';
+import '../services/keepalive.dart' as svc;
 
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({super.key, required this.item});
@@ -20,6 +21,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   VideoPlayerController? _video;
   ChewieController? _chewie;
   String? _error;
+  bool _playbackServiceOn = false;
 
   @override
   void initState() {
@@ -28,10 +30,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _init();
   }
 
+  /// Mirror the play/pause state into the media-playback foreground service
+  /// so audio keeps running when the app is minimized.
+  void _onPlayStateChanged() {
+    final playing = _video?.value.isPlaying ?? false;
+    if (playing && !_playbackServiceOn) {
+      _playbackServiceOn = true;
+      svc.KeepAlive.startPlayback(widget.item.title);
+    } else if (!playing && _playbackServiceOn) {
+      _playbackServiceOn = false;
+      svc.KeepAlive.stopPlayback();
+    }
+  }
+
   Future<void> _init() async {
     try {
-      final controller =
-          VideoPlayerController.file(File(widget.item.filePath!));
+      // allowBackgroundPlayback: without it video_player force-pauses when
+      // the app is minimized, which defeats listen-in-background.
+      final controller = VideoPlayerController.file(
+        File(widget.item.filePath!),
+        videoPlayerOptions: VideoPlayerOptions(allowBackgroundPlayback: true),
+      );
       await controller.initialize();
       final chewie = ChewieController(
         videoPlayerController: controller,
@@ -46,10 +65,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
         controller.dispose();
         return;
       }
+      controller.addListener(_onPlayStateChanged);
       setState(() {
         _video = controller;
         _chewie = chewie;
       });
+      _onPlayStateChanged();
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     }
@@ -58,6 +79,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     WakelockPlus.disable();
+    if (_playbackServiceOn) svc.KeepAlive.stopPlayback();
+    _video?.removeListener(_onPlayStateChanged);
     _chewie?.dispose();
     _video?.dispose();
     super.dispose();

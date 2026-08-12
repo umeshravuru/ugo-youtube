@@ -60,10 +60,19 @@ Drop the proxy's root CA (PEM) at
 `Android/data/com.ugoyt.ugo_yt/files/extra_ca.pem` on the phone and restart the app —
 it's trusted **in addition to** system roots, never instead of them.
 
-## Known limitations (v1)
+## Resilience (v1.1)
 
-- Keep the phone on Wi-Fi and give it a few seconds; if you force-kill the app mid-download,
-  the item shows **Retry** on next launch (no partial resume).
+YouTube's servers routinely stall raw stream transfers mid-download. ugo-yt downloads in
+8 MB ranged segments with a per-segment inactivity watchdog, automatic retries, byte-exact
+resume, and stream-URL refresh on expiry — stalls recover without restarting the download.
+Playback runs under a `mediaPlayback` foreground service, so audio keeps playing when you
+minimize the app or turn the screen off.
+
+## Known limitations
+
+- If you force-kill the app mid-download, the item shows **Retry** on next launch
+  (resume only works within a session).
 - One download at a time (queued serially).
+- No audio-focus handling: ugo-yt won't pause other apps' audio and vice versa.
 - iOS: the Flutter app runs, but the iOS share extension + background plumbing is a follow-up
   milestone — Android is the testing target for now.
