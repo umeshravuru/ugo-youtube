@@ -6,13 +6,21 @@ import '../models/video_item.dart';
 import '../services/downloader.dart';
 import '../services/library_store.dart';
 import '../util/format.dart';
-import 'player_screen.dart';
+import 'player_panel.dart';
 
-class LibraryScreen extends StatelessWidget {
-  const LibraryScreen({super.key, required this.store, required this.downloader});
+class LibraryScreen extends StatefulWidget {
+  const LibraryScreen(
+      {super.key, required this.store, required this.downloader});
 
   final LibraryStore store;
   final DownloadManager downloader;
+
+  @override
+  State<LibraryScreen> createState() => _LibraryScreenState();
+}
+
+class _LibraryScreenState extends State<LibraryScreen> {
+  String? _playingId;
 
   @override
   Widget build(BuildContext context) {
@@ -29,22 +37,52 @@ class LibraryScreen extends StatelessWidget {
         ],
       ),
       body: ValueListenableBuilder<List<VideoItem>>(
-        valueListenable: store.items,
+        valueListenable: widget.store.items,
         builder: (context, items, _) {
-          if (items.isEmpty) return const _EmptyHint();
-          return ListView.separated(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-            itemCount: items.length,
-            separatorBuilder: (_, _) => const SizedBox(height: 8),
-            itemBuilder: (context, i) => _VideoTile(
-              item: items[i],
-              downloader: downloader,
-              store: store,
-            ),
+          VideoItem? playing;
+          for (final it in items) {
+            if (it.id == _playingId) {
+              playing = it;
+              break;
+            }
+          }
+          return Column(
+            children: [
+              if (playing != null)
+                PlayerPanel(
+                  // Source (file vs network preview) is fixed per panel
+                  // instance; keying by id keeps it stable while the item's
+                  // status/progress fields update underneath.
+                  key: ValueKey('player-${playing.id}'),
+                  item: playing,
+                  store: widget.store,
+                  onClose: () => setState(() => _playingId = null),
+                ),
+              Expanded(
+                child: items.isEmpty
+                    ? const _EmptyHint()
+                    : ListView.separated(
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+                        itemCount: items.length,
+                        separatorBuilder: (_, _) => const SizedBox(height: 8),
+                        itemBuilder: (context, i) => _VideoTile(
+                          item: items[i],
+                          downloader: widget.downloader,
+                          store: widget.store,
+                          isPlaying: items[i].id == _playingId,
+                          onPlay: _onPlay,
+                        ),
+                      ),
+              ),
+            ],
           );
         },
       ),
     );
+  }
+
+  void _onPlay(VideoItem item) {
+    setState(() => _playingId = item.id);
   }
 
   Future<void> _promptForLink(BuildContext context) async {
@@ -71,7 +109,7 @@ class LibraryScreen extends StatelessWidget {
       ),
     );
     if (text != null && text.trim().isNotEmpty) {
-      await downloader.enqueueFromSharedText(text);
+      await widget.downloader.enqueueFromSharedText(text);
     }
   }
 }
@@ -113,30 +151,27 @@ class _VideoTile extends StatelessWidget {
     required this.item,
     required this.downloader,
     required this.store,
+    required this.isPlaying,
+    required this.onPlay,
   });
 
   final VideoItem item;
   final DownloadManager downloader;
   final LibraryStore store;
+  final bool isPlaying;
+  final void Function(VideoItem) onPlay;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final playable = item.status == VideoStatus.done && item.filePath != null;
 
     return Material(
-      color: scheme.surfaceContainerHigh,
+      color:
+          isPlaying ? scheme.surfaceContainerHighest : scheme.surfaceContainerHigh,
       borderRadius: BorderRadius.circular(14),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: playable
-            ? () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => PlayerScreen(item: item),
-                  ),
-                )
-            : null,
+        onTap: item.isPlayable ? () => onPlay(item) : null,
         child: Padding(
           padding: const EdgeInsets.all(10),
           child: Row(
@@ -276,7 +311,9 @@ class _StatusRow extends StatelessWidget {
           VideoStatus.queued => 'Queued',
           VideoStatus.fetching => 'Fetching info…',
           VideoStatus.muxing => 'Merging…',
-          _ => 'Downloading ${(item.progress * 100).round()}%',
+          _ => item.previewUrl != null
+              ? 'Downloading ${(item.progress * 100).round()}% • tap to watch now'
+              : 'Downloading ${(item.progress * 100).round()}%',
         };
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,

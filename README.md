@@ -13,7 +13,11 @@ evicted automatically, files included).
 2. ugo-yt opens, grabs the highest-quality H.264 video (≤1080p) + AAC audio streams,
    downloads them with a progress notification, and merges them into a single MP4 on-device
    (stream copy — fast, no re-encode).
-3. The video appears in your library. Tap to play (speed controls, fullscreen, seek).
+3. **Watch immediately**: while it downloads, tap the item to stream a preview right away
+   (~360p over the network); once the download finishes, playback uses the local 1080p file.
+4. Videos play in an inline docked player (YouTube-style) with a fullscreen button,
+   speed controls, and seek. ugo-yt **remembers where you stopped** and resumes there —
+   even across app restarts and the preview→local switch.
 
 You can also paste a link manually with the **⊕ link** button in the app bar.
 

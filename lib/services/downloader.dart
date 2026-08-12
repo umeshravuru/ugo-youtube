@@ -186,6 +186,10 @@ class DownloadManager {
       }
     }
 
+    // Publish the pre-muxed stream URL so the UI can play the video over
+    // the network while the full-quality download is still running.
+    item.previewUrl = pick.muxed?.url.toString();
+
     item.status = VideoStatus.downloading;
     item.progress = 0;
     store.upsert(item);
@@ -206,6 +210,7 @@ class DownloadManager {
     item.status = VideoStatus.done;
     item.progress = 1;
     item.error = null;
+    item.previewUrl = null; // local file supersedes the network preview
     store.upsert(item);
     await store.enforceLimit();
     onMessage?.call('Saved: ${item.title}');

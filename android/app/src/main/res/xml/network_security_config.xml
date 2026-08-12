@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Trust user-installed CAs in addition to system ones: personal-use app,
+     lets streaming playback work behind TLS-inspecting proxies (Zscaler)
+     when the owner deliberately installs the proxy's CA on the device.
+     Complements the Dart-side extra_ca.pem mechanism (see README). -->
+<network-security-config>
+    <base-config>
+        <trust-anchors>
+            <certificates src="system"/>
+            <certificates src="user"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>

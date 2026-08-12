@@ -21,6 +21,8 @@ class VideoItem {
     this.error,
     this.filePath,
     this.thumbPath,
+    this.lastPositionMs = 0,
+    this.previewUrl,
   });
 
   factory VideoItem.queued(String id) => VideoItem(
@@ -41,6 +43,18 @@ class VideoItem {
   String? thumbPath;
   final int createdAt; // epoch ms when first queued
 
+  /// Last watched position, for resume. Persisted.
+  int lastPositionMs;
+
+  /// Network URL of the pre-muxed stream — lets the video play while the
+  /// full-quality download is still running. NOT persisted (URLs expire).
+  String? previewUrl;
+
+  /// True when the item can be played right now (local file or preview).
+  bool get isPlayable =>
+      (status == VideoStatus.done && filePath != null) ||
+      (status.isActive && previewUrl != null);
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'title': title,
@@ -53,6 +67,8 @@ class VideoItem {
         'filePath': filePath,
         'thumbPath': thumbPath,
         'createdAt': createdAt,
+        'lastPositionMs': lastPositionMs,
+        // previewUrl intentionally not persisted — stream URLs expire.
       };
 
   factory VideoItem.fromJson(Map<String, dynamic> json) => VideoItem(
@@ -68,5 +84,6 @@ class VideoItem {
         error: json['error'] as String?,
         filePath: json['filePath'] as String?,
         thumbPath: json['thumbPath'] as String?,
+        lastPositionMs: (json['lastPositionMs'] as num?)?.toInt() ?? 0,
       );
 }
