@@ -6,9 +6,12 @@ import 'package:flutter/services.dart';
 class KeepAlive {
   static const MethodChannel _channel = MethodChannel('ugoyt/keepalive');
 
+  static const _callTimeout = Duration(seconds: 5);
+
   static Future<void> start(String text) async {
     try {
-      await _channel.invokeMethod('start', {'text': text});
+      await _channel
+          .invokeMethod('start', {'text': text}).timeout(_callTimeout);
     } catch (_) {}
   }
 
@@ -18,13 +21,13 @@ class KeepAlive {
       await _channel.invokeMethod('update', {
         'text': text,
         'progress': progress,
-      });
+      }).timeout(_callTimeout);
     } catch (_) {}
   }
 
   static Future<void> stop() async {
     try {
-      await _channel.invokeMethod('stop');
+      await _channel.invokeMethod('stop').timeout(_callTimeout);
     } catch (_) {}
   }
 }

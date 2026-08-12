@@ -63,6 +63,16 @@ class LibraryStore {
     if (persist) _persist();
   }
 
+  /// Update an existing item in place without persisting; no-op if the item
+  /// was removed (e.g. cancelled mid-download). Used for progress ticks.
+  void updateExisting(VideoItem item) {
+    final list = [...items.value];
+    final i = list.indexWhere((e) => e.id == item.id);
+    if (i < 0) return;
+    list[i] = item;
+    items.value = List.unmodifiable(list);
+  }
+
   Future<void> remove(String id) async {
     final list = [...items.value];
     final i = list.indexWhere((e) => e.id == id);

@@ -314,13 +314,16 @@ class _Menu extends StatelessWidget {
     return PopupMenuButton<String>(
       icon: const Icon(Icons.more_vert, size: 20),
       onSelected: (value) {
-        if (value == 'delete') store.remove(item.id);
+        if (value == 'delete') downloader.cancelAndRemove(item.id);
         if (value == 'retry') downloader.retry(item.id);
       },
       itemBuilder: (context) => [
         if (item.status == VideoStatus.failed)
           const PopupMenuItem(value: 'retry', child: Text('Retry')),
-        const PopupMenuItem(value: 'delete', child: Text('Delete')),
+        PopupMenuItem(
+          value: 'delete',
+          child: Text(item.status.isActive ? 'Cancel download' : 'Delete'),
+        ),
       ],
     );
   }

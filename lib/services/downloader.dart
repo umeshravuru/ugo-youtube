@@ -11,11 +11,23 @@ import 'library_store.dart';
 import 'mux.dart';
 import 'stream_pick.dart';
 
+/// Thrown internally when the user cancels an in-flight download.
+class _Cancelled implements Exception {}
+
 /// Serial download queue: extract → download stream(s) → mux → finalize.
 /// Runs in the main isolate; the native foreground service (via [KeepAlive])
 /// keeps the process alive while the queue is non-empty.
+///
+/// Every network stage has a timeout and the byte stream has an inactivity
+/// watchdog, so a black-holed connection (flaky network, TLS-inspecting VPN)
+/// fails the item with a Retry instead of wedging the queue forever.
 class DownloadManager {
   DownloadManager({required this.store, required this.mediaDir});
+
+  static const _metaTimeout = Duration(seconds: 60);
+  static const _manifestTimeout = Duration(seconds: 90);
+  static const _streamInactivityTimeout = Duration(seconds: 60);
+  static const _muxTimeout = Duration(minutes: 10);
 
   final LibraryStore store;
   final Directory mediaDir;
@@ -24,6 +36,7 @@ class DownloadManager {
   void Function(String message)? onMessage;
 
   final List<String> _queue = [];
+  final Set<String> _cancelRequested = {};
   bool _running = false;
   final YoutubeExplode _yt = YoutubeExplode();
 
@@ -34,6 +47,7 @@ class DownloadManager {
       onMessage?.call('That doesn\'t look like a YouTube link');
       return;
     }
+    _cancelRequested.remove(id); // stale flag from an earlier cancel
     final existing = store.byId(id);
     if (existing != null && existing.status == VideoStatus.done) {
       onMessage?.call('Already in your library');
@@ -57,6 +71,17 @@ class DownloadManager {
 
   Future<void> retry(String id) => enqueueFromSharedText(id);
 
+  /// Cancel (if in flight) and remove an item, media files included.
+  /// Safe to call for any status.
+  Future<void> cancelAndRemove(String id) async {
+    final item = store.byId(id);
+    if (item != null && item.status.isActive) {
+      _cancelRequested.add(id); // in-flight loops abort at next checkpoint
+    }
+    _queue.remove(id);
+    await store.remove(id);
+  }
+
   /// Remove leftover .part files from interrupted runs.
   Future<void> cleanupStrayParts() async {
     try {
@@ -73,15 +98,21 @@ class DownloadManager {
   Future<void> _pump() async {
     if (_running) return;
     _running = true;
-    await KeepAlive.start('Starting download…');
     try {
+      await KeepAlive.start('Starting download…');
       while (_queue.isNotEmpty) {
         final id = _queue.removeAt(0);
+        if (_cancelRequested.remove(id)) continue;
         final item = store.byId(id);
         if (item == null) continue;
         try {
           await _download(item);
+        } on _Cancelled {
+          _cancelRequested.remove(id);
+          // Item was removed by cancelAndRemove; nothing to update.
         } catch (e) {
+          _cancelRequested.remove(id);
+          if (store.byId(id) == null) continue; // deleted while failing
           item.status = VideoStatus.failed;
           item.error = _friendlyError(e);
           store.upsert(item);
@@ -94,16 +125,21 @@ class DownloadManager {
     }
   }
 
+  void _checkpoint(String id) {
+    if (_cancelRequested.contains(id)) throw _Cancelled();
+  }
+
   Future<void> _download(VideoItem item) async {
     final id = VideoId(item.id);
 
     item.status = VideoStatus.fetching;
     store.upsert(item);
 
-    final video = await _yt.videos.get(id);
+    final video = await _yt.videos.get(id).timeout(_metaTimeout);
     if (video.isLive) {
       throw const FormatException('Live streams are not supported');
     }
+    _checkpoint(item.id);
     item.title = video.title;
     item.author = video.author;
     item.durationMs = video.duration?.inMilliseconds ?? 0;
@@ -122,7 +158,9 @@ class DownloadManager {
       }
     } catch (_) {}
 
-    final manifest = await _yt.videos.streamsClient.getManifest(id);
+    _checkpoint(item.id);
+    final manifest =
+        await _yt.videos.streamsClient.getManifest(id).timeout(_manifestTimeout);
     final pick = pickStreams(manifest);
 
     item.status = VideoStatus.downloading;
@@ -133,11 +171,13 @@ class DownloadManager {
     if (pick.isAdaptive) {
       result = await _downloadAdaptive(item, pick);
     }
+    _checkpoint(item.id);
     result ??= await _downloadMuxed(item, pick);
     if (result == null) {
       throw const FormatException('No downloadable streams found');
     }
 
+    _checkpoint(item.id);
     item.filePath = result.path;
     item.sizeBytes = await result.length();
     item.status = VideoStatus.done;
@@ -162,22 +202,31 @@ class DownloadManager {
         _reportProgress(item, total == 0 ? 0 : received / total);
       }
 
-      await _downloadStream(pick.video!, vPart, onChunk);
-      await _downloadStream(pick.audio!, aPart, onChunk);
+      await _downloadStream(item.id, pick.video!, vPart, onChunk);
+      await _downloadStream(item.id, pick.audio!, aPart, onChunk);
 
       item.status = VideoStatus.muxing;
       store.upsert(item);
       await KeepAlive.update('Merging: ${item.title}', progress: 100);
 
-      final ok = await muxCopy(vPart.path, aPart.path, out.path);
+      final ok = await muxCopy(vPart.path, aPart.path, out.path)
+          .timeout(_muxTimeout, onTimeout: () => false);
       if (!ok || !await out.exists() || await out.length() == 0) {
         try {
           if (await out.exists()) await out.delete();
         } catch (_) {}
         return null;
       }
+      if (_cancelRequested.contains(item.id)) {
+        try {
+          await out.delete();
+        } catch (_) {}
+        throw _Cancelled();
+      }
       return out;
-    } catch (_) {
+    } on _Cancelled {
+      rethrow;
+    } catch (e) {
       return null;
     } finally {
       for (final f in [vPart, aPart]) {
@@ -192,33 +241,77 @@ class DownloadManager {
     final muxed = pick.muxed;
     if (muxed == null) return null;
     final ext = muxed.container.name == 'webm' ? 'webm' : 'mp4';
+    final part = File('${mediaDir.path}/${item.id}.dl.part');
     final out = File('${mediaDir.path}/${item.id}.$ext');
     item.status = VideoStatus.downloading;
     store.upsert(item);
-    final total = muxed.size.totalBytes;
-    var received = 0;
-    await _downloadStream(muxed, out, (bytes) {
-      received += bytes;
-      _reportProgress(item, total == 0 ? 0 : received / total);
-    });
-    return out;
+    try {
+      final total = muxed.size.totalBytes;
+      var received = 0;
+      await _downloadStream(item.id, muxed, part, (bytes) {
+        received += bytes;
+        _reportProgress(item, total == 0 ? 0 : received / total);
+      });
+      return await part.rename(out.path);
+    } finally {
+      try {
+        if (await part.exists()) await part.delete();
+      } catch (_) {}
+    }
   }
 
+  /// Explicit-subscription download loop. Completion is driven only by our
+  /// own completer (done / error / cancel / inactivity watchdog), so a
+  /// wedged source stream or slow library teardown can never block the
+  /// queue — teardown is fire-and-forget.
   Future<void> _downloadStream(
+    String itemId,
     StreamInfo info,
     File target,
     void Function(int bytes) onChunk,
   ) async {
     final sink = target.openWrite();
-    try {
-      final stream = _yt.videos.streamsClient.get(info);
-      await for (final chunk in stream) {
+    final done = Completer<void>();
+    Timer? watchdog;
+    void armWatchdog() {
+      watchdog?.cancel();
+      watchdog = Timer(_streamInactivityTimeout, () {
+        if (!done.isCompleted) {
+          done.completeError(
+              TimeoutException('No data for ${_streamInactivityTimeout.inSeconds}s'));
+        }
+      });
+    }
+
+    armWatchdog();
+    final sub = _yt.videos.streamsClient.get(info).listen(
+      (chunk) {
+        if (done.isCompleted) return;
+        if (_cancelRequested.contains(itemId)) {
+          done.completeError(_Cancelled());
+          return;
+        }
+        armWatchdog();
         sink.add(chunk);
         onChunk(chunk.length);
-      }
+      },
+      onError: (Object e, StackTrace st) {
+        if (!done.isCompleted) done.completeError(e, st);
+      },
+      onDone: () {
+        if (!done.isCompleted) done.complete();
+      },
+      cancelOnError: true,
+    );
+
+    try {
+      await done.future;
       await sink.flush();
     } finally {
-      await sink.close();
+      watchdog?.cancel();
+      // Never await these: library/file teardown must not wedge the queue.
+      unawaited(sub.cancel().catchError((_) {}));
+      unawaited(sink.close().catchError((_) {}));
     }
   }
 
@@ -230,7 +323,7 @@ class DownloadManager {
     item.progress = progress.clamp(0.0, 1.0);
     if (now.difference(_lastUiUpdate).inMilliseconds >= 400) {
       _lastUiUpdate = now;
-      store.upsert(item, persist: false);
+      store.updateExisting(item); // never re-inserts a just-cancelled item
     }
     if (now.difference(_lastNotifUpdate).inMilliseconds >= 1200) {
       _lastNotifUpdate = now;
@@ -242,14 +335,21 @@ class DownloadManager {
   }
 
   String _friendlyError(Object e) {
+    if (e is TimeoutException) {
+      return 'Timed out — check connection (VPN?) and retry';
+    }
     final s = e.toString();
+    if (s.contains('CERTIFICATE_VERIFY_FAILED') ||
+        s.contains('HandshakeException')) {
+      return 'TLS blocked (corporate VPN/proxy?) — see README';
+    }
     if (s.contains('VideoUnavailable') || s.contains('unavailable')) {
       return 'Video unavailable';
     }
     if (s.contains('RequiresLogin') || s.contains('age')) {
       return 'Video requires sign-in (age restricted?)';
     }
-    if (s.contains('SocketException') || s.contains('TimeoutException')) {
+    if (s.contains('SocketException')) {
       return 'Network error — check connection';
     }
     if (e is FormatException) return e.message;
