@@ -1,0 +1,26 @@
+name: ugo_yt
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  chewie: ^1.14.1
+  ffmpeg_kit_flutter_new_min: ^3.6.2
+  flutter:
+    sdk: flutter
+  http: ^1.6.0
+  path_provider: ^2.1.6
+  video_player: ^2.14.0
+  wakelock_plus: ^1.7.0
+  youtube_explode_dart: ^3.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
