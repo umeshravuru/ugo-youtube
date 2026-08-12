@@ -15,6 +15,8 @@ Future<void> main() async {
   final mediaDir = Directory('${baseDir.path}/videos');
   await mediaDir.create(recursive: true);
 
+  _trustExtraCaIfPresent(baseDir);
+
   final store = LibraryStore(baseDir);
   await store.load();
 
@@ -34,6 +36,29 @@ Future<void> main() async {
     downloader: downloader,
     messengerKey: messengerKey,
   ));
+}
+
+/// Corporate-network support: if `extra_ca.pem` exists in the app's data
+/// dir, trust it in addition to the system roots (never instead of them).
+/// Lets the app work behind TLS-inspecting proxies like Zscaler.
+void _trustExtraCaIfPresent(Directory baseDir) {
+  try {
+    final pem = File('${baseDir.path}/extra_ca.pem');
+    if (!pem.existsSync()) return;
+    final context = SecurityContext(withTrustedRoots: true)
+      ..setTrustedCertificates(pem.path);
+    HttpOverrides.global = _ExtraCaHttpOverrides(context);
+  } catch (_) {}
+}
+
+class _ExtraCaHttpOverrides extends HttpOverrides {
+  _ExtraCaHttpOverrides(this._context);
+
+  final SecurityContext _context;
+
+  @override
+  HttpClient createHttpClient(SecurityContext? context) =>
+      super.createHttpClient(context ?? _context);
 }
 
 /// App-specific external storage on Android (no permissions needed, more

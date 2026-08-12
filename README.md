@@ -53,6 +53,13 @@ dart run tool/probe.dart [url] [--download]    # verify extraction works from th
 2. Open the APK on the phone → allow **Install unknown apps** for the file manager when asked.
 3. First launch asks for notification permission — allow it so you can see download progress.
 
+## Corporate networks (Zscaler etc.)
+
+If downloads fail with `CERTIFICATE_VERIFY_FAILED` you're behind a TLS-inspecting proxy.
+Drop the proxy's root CA (PEM) at
+`Android/data/com.ugoyt.ugo_yt/files/extra_ca.pem` on the phone and restart the app —
+it's trusted **in addition to** system roots, never instead of them.
+
 ## Known limitations (v1)
 
 - Keep the phone on Wi-Fi and give it a few seconds; if you force-kill the app mid-download,
