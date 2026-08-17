@@ -36,7 +36,9 @@ class MainActivity : FlutterActivity() {
             }
         }
 
-        MethodChannel(messenger, "ugoyt/keepalive").setMethodCallHandler { call, result ->
+        val keepAliveChannel = MethodChannel(messenger, "ugoyt/keepalive")
+        PlaybackBridge.channel = keepAliveChannel
+        keepAliveChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "start" -> {
                     DownloadService.start(this, call.argument<String>("text") ?: "Downloading…")
@@ -54,8 +56,15 @@ class MainActivity : FlutterActivity() {
                     DownloadService.stop(this)
                     result.success(null)
                 }
-                "startPlayback" -> {
-                    PlaybackService.start(this, call.argument<String>("title") ?: "Playing")
+                "updatePlayback" -> {
+                    PlaybackService.update(
+                        this,
+                        call.argument<String>("title") ?: "Playing",
+                        call.argument<Boolean>("isPlaying") ?: true,
+                        call.argument<Number>("positionMs")?.toLong() ?: 0L,
+                        call.argument<Number>("durationMs")?.toLong() ?: 0L,
+                        call.argument<String>("thumbPath"),
+                    )
                     result.success(null)
                 }
                 "stopPlayback" -> {

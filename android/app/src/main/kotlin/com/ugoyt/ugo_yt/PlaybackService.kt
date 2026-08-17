@@ -8,35 +8,110 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.BitmapFactory
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
+import android.support.v4.media.MediaMetadataCompat
+import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import io.flutter.plugin.common.MethodChannel
+
+/** Routes media-session actions (lock screen, headsets) back into Dart. */
+object PlaybackBridge {
+    @Volatile
+    var channel: MethodChannel? = null
+    private val main = Handler(Looper.getMainLooper())
+
+    fun sendAction(action: String) {
+        main.post { channel?.invokeMethod("mediaAction", action) }
+    }
+
+    fun sendSeek(positionMs: Long) {
+        main.post { channel?.invokeMethod("mediaSeek", positionMs) }
+    }
+}
 
 /**
- * Foreground service active while a video is playing, so playback (audio)
- * survives the app being minimized — otherwise Android's cached-app freezer
- * suspends the process and the sound stops.
+ * Foreground service active while the player panel is open. Hosts the
+ * MediaSession + MediaStyle notification that puts play/pause (and a seek
+ * bar) on the lock screen, and keeps the process alive so audio continues
+ * when the app is minimized or the screen is off.
  */
 class PlaybackService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
+    private var session: MediaSessionCompat? = null
+
+    private var title: String = "Playing"
+    private var playing: Boolean = true
+    private var positionMs: Long = 0
+    private var durationMs: Long = 0
+    private var thumbPath: String? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ugoyt:playback").apply {
-            setReferenceCounted(false)
-            acquire(4 * 60 * 60 * 1000L) // 4h safety cap
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ugoyt:playback")
+            .apply { setReferenceCounted(false) }
+        session = MediaSessionCompat(this, "ugoyt-playback").apply {
+            setCallback(object : MediaSessionCompat.Callback() {
+                override fun onPlay() = PlaybackBridge.sendAction("play")
+                override fun onPause() = PlaybackBridge.sendAction("pause")
+                override fun onSeekTo(pos: Long) = PlaybackBridge.sendSeek(pos)
+            })
+            isActive = true
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Playing"
+        if (intent?.action == ACTION_TOGGLE) {
+            PlaybackBridge.sendAction("playPause")
+            return START_NOT_STICKY
+        }
+        applyUpdate(
+            intent?.getStringExtra(EXTRA_TITLE) ?: title,
+            if (intent?.hasExtra(EXTRA_PLAYING) == true) {
+                intent.getBooleanExtra(EXTRA_PLAYING, true)
+            } else {
+                playing
+            },
+            intent?.getLongExtra(EXTRA_POSITION, positionMs) ?: positionMs,
+            intent?.getLongExtra(EXTRA_DURATION, durationMs) ?: durationMs,
+            intent?.getStringExtra(EXTRA_THUMB) ?: thumbPath,
+        )
+        return START_NOT_STICKY
+    }
+
+    fun applyUpdate(
+        title: String,
+        playing: Boolean,
+        positionMs: Long,
+        durationMs: Long,
+        thumbPath: String?,
+    ) {
+        this.title = title
+        this.playing = playing
+        this.positionMs = positionMs
+        this.durationMs = durationMs
+        this.thumbPath = thumbPath
+
+        // Hold the CPU only while actually playing.
+        if (playing) {
+            wakeLock?.acquire(4 * 60 * 60 * 1000L)
+        } else {
+            wakeLock?.let { if (it.isHeld) it.release() }
+        }
+
+        updateSession()
         ensureChannel(this)
-        val notification = build(this, title)
+        val notification = build()
         if (Build.VERSION.SDK_INT >= 29) {
             ServiceCompat.startForeground(
                 this, NOTIF_ID, notification,
@@ -45,22 +120,120 @@ class PlaybackService : Service() {
         } else {
             startForeground(NOTIF_ID, notification)
         }
-        return START_NOT_STICKY
+    }
+
+    private fun updateSession() {
+        val s = session ?: return
+        val meta = MediaMetadataCompat.Builder()
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "ugo-yt")
+        if (durationMs > 0) {
+            meta.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs)
+        }
+        thumbPath?.let { path ->
+            try {
+                BitmapFactory.decodeFile(path)?.let { bmp ->
+                    meta.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bmp)
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        s.setMetadata(meta.build())
+        s.setPlaybackState(
+            PlaybackStateCompat.Builder()
+                .setActions(
+                    PlaybackStateCompat.ACTION_PLAY
+                        or PlaybackStateCompat.ACTION_PAUSE
+                        or PlaybackStateCompat.ACTION_PLAY_PAUSE
+                        or PlaybackStateCompat.ACTION_SEEK_TO
+                )
+                .setState(
+                    if (playing) PlaybackStateCompat.STATE_PLAYING
+                    else PlaybackStateCompat.STATE_PAUSED,
+                    positionMs,
+                    if (playing) 1f else 0f,
+                )
+                .build()
+        )
+    }
+
+    private fun build(): Notification {
+        val launch = packageManager.getLaunchIntentForPackage(packageName)
+        val contentIntent = launch?.let {
+            PendingIntent.getActivity(
+                this, 1, it,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        }
+        val toggleIntent = PendingIntent.getService(
+            this, 2,
+            Intent(this, PlaybackService::class.java).setAction(ACTION_TOGGLE),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle(title)
+            .setContentText(if (playing) "Playing" else "Paused")
+            .addAction(
+                if (playing) android.R.drawable.ic_media_pause
+                else android.R.drawable.ic_media_play,
+                if (playing) "Pause" else "Play",
+                toggleIntent,
+            )
+            .setStyle(
+                androidx.media.app.NotificationCompat.MediaStyle()
+                    .setMediaSession(session?.sessionToken)
+                    .setShowActionsInCompactView(0)
+            )
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOngoing(playing)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(contentIntent)
+            .build()
     }
 
     override fun onDestroy() {
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
+        session?.release()
+        session = null
+        instance = null
         super.onDestroy()
     }
 
     companion object {
         private const val CHANNEL_ID = "playback"
         private const val NOTIF_ID = 2
+        private const val ACTION_TOGGLE = "com.ugoyt.ugo_yt.TOGGLE_PLAYBACK"
         private const val EXTRA_TITLE = "title"
+        private const val EXTRA_PLAYING = "playing"
+        private const val EXTRA_POSITION = "positionMs"
+        private const val EXTRA_DURATION = "durationMs"
+        private const val EXTRA_THUMB = "thumbPath"
 
-        fun start(ctx: Context, title: String) {
-            val intent = Intent(ctx, PlaybackService::class.java).putExtra(EXTRA_TITLE, title)
+        @Volatile
+        private var instance: PlaybackService? = null
+
+        /** Start the service if needed, then apply the playback state. */
+        fun update(
+            ctx: Context,
+            title: String,
+            playing: Boolean,
+            positionMs: Long,
+            durationMs: Long,
+            thumbPath: String?,
+        ) {
+            val running = instance
+            if (running != null) {
+                running.applyUpdate(title, playing, positionMs, durationMs, thumbPath)
+                return
+            }
+            val intent = Intent(ctx, PlaybackService::class.java)
+                .putExtra(EXTRA_TITLE, title)
+                .putExtra(EXTRA_PLAYING, playing)
+                .putExtra(EXTRA_POSITION, positionMs)
+                .putExtra(EXTRA_DURATION, durationMs)
+                .putExtra(EXTRA_THUMB, thumbPath)
             if (Build.VERSION.SDK_INT >= 26) {
                 ctx.startForegroundService(intent)
             } else {
@@ -81,24 +254,6 @@ class PlaybackService : Service() {
                     )
                 )
             }
-        }
-
-        private fun build(ctx: Context, title: String): Notification {
-            val launch = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)
-            val contentIntent = launch?.let {
-                PendingIntent.getActivity(
-                    ctx, 1, it,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-            }
-            return NotificationCompat.Builder(ctx, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle("ugo-yt")
-                .setContentText(title)
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setContentIntent(contentIntent)
-                .build()
         }
     }
 }

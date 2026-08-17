@@ -69,8 +69,10 @@ it's trusted **in addition to** system roots, never instead of them.
 YouTube's servers routinely stall raw stream transfers mid-download. ugo-yt downloads in
 8 MB ranged segments with a per-segment inactivity watchdog, automatic retries, byte-exact
 resume, and stream-URL refresh on expiry — stalls recover without restarting the download.
-Playback runs under a `mediaPlayback` foreground service, so audio keeps playing when you
-minimize the app or turn the screen off.
+Playback runs under a `mediaPlayback` foreground service with a system **MediaSession**, so
+audio keeps playing when you minimize the app or turn the screen off — and the lock screen
+shows a media card (artwork, title, progress) with play/pause that controls the player.
+Headset/watch media buttons work too.
 
 ## Known limitations
 

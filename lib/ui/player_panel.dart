@@ -37,7 +37,8 @@ class _PlayerPanelState extends State<PlayerPanel> {
   ChewieController? _chewie;
   String? _error;
   Timer? _positionSaver;
-  bool _playbackServiceOn = false;
+  bool _serviceStarted = false;
+  bool _lastReportedPlaying = false;
 
   // Source is decided once at creation; a mid-watch swap (download finishing)
   // would dispose controllers under chewie's fullscreen route.
@@ -48,7 +49,28 @@ class _PlayerPanelState extends State<PlayerPanel> {
   void initState() {
     super.initState();
     WakelockPlus.enable();
+    svc.KeepAlive.ensureMediaHandler();
+    svc.KeepAlive.onMediaAction = _onMediaAction;
+    svc.KeepAlive.onMediaSeek = _onMediaSeek;
     _init();
+  }
+
+  /// Lock-screen / headset button presses.
+  void _onMediaAction(String action) {
+    final video = _video;
+    if (video == null || !video.value.isInitialized) return;
+    switch (action) {
+      case 'play':
+        video.play();
+      case 'pause':
+        video.pause();
+      case 'playPause':
+        video.value.isPlaying ? video.pause() : video.play();
+    }
+  }
+
+  void _onMediaSeek(Duration position) {
+    _video?.seekTo(position);
   }
 
   Future<void> _init() async {
@@ -100,10 +122,13 @@ class _PlayerPanelState extends State<PlayerPanel> {
         _chewie = chewie;
       });
       _onPlayStateChanged();
-      _positionSaver = Timer.periodic(
-        const Duration(seconds: 5),
-        (_) => _savePosition(),
-      );
+      _positionSaver = Timer.periodic(const Duration(seconds: 5), (_) {
+        _savePosition();
+        // Keep the lock-screen seek bar in sync.
+        if (_serviceStarted && _lastReportedPlaying) {
+          _pushPlaybackState(true);
+        }
+      });
     } catch (e) {
       if (mounted) {
         setState(() => _error = _useLocalFile
@@ -113,18 +138,29 @@ class _PlayerPanelState extends State<PlayerPanel> {
     }
   }
 
-  /// Mirror the play/pause state into the media-playback foreground service
-  /// so audio keeps running when the app is minimized.
+  /// Mirror play/pause into the media-playback service, which keeps audio
+  /// alive in background and drives the lock-screen media card. The service
+  /// stays up (paused state) while the panel is open so the lock screen can
+  /// un-pause; it stops when the panel closes.
   void _onPlayStateChanged() {
     final playing = _video?.value.isPlaying ?? false;
-    if (playing && !_playbackServiceOn) {
-      _playbackServiceOn = true;
-      svc.KeepAlive.startPlayback(widget.item.title);
-    } else if (!playing && _playbackServiceOn) {
-      _playbackServiceOn = false;
-      svc.KeepAlive.stopPlayback();
-      _savePosition();
-    }
+    if (!_serviceStarted && !playing) return;
+    if (_serviceStarted && playing == _lastReportedPlaying) return;
+    _serviceStarted = true;
+    _lastReportedPlaying = playing;
+    _pushPlaybackState(playing);
+    if (!playing) _savePosition();
+  }
+
+  void _pushPlaybackState(bool playing) {
+    final value = _video?.value;
+    svc.KeepAlive.updatePlayback(
+      title: widget.item.title,
+      isPlaying: playing,
+      positionMs: value?.position.inMilliseconds ?? 0,
+      durationMs: widget.item.durationMs,
+      thumbPath: widget.item.thumbPath,
+    );
   }
 
   void _savePosition() {
@@ -140,7 +176,9 @@ class _PlayerPanelState extends State<PlayerPanel> {
   void dispose() {
     _positionSaver?.cancel();
     _savePosition();
-    if (_playbackServiceOn) svc.KeepAlive.stopPlayback();
+    svc.KeepAlive.onMediaAction = null;
+    svc.KeepAlive.onMediaSeek = null;
+    if (_serviceStarted) svc.KeepAlive.stopPlayback();
     WakelockPlus.disable();
     _video?.removeListener(_onPlayStateChanged);
     _chewie?.dispose();
