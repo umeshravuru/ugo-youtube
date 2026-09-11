@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:chewie/chewie.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
@@ -48,7 +49,6 @@ class _PlayerPanelState extends State<PlayerPanel> {
   @override
   void initState() {
     super.initState();
-    WakelockPlus.enable();
     svc.KeepAlive.ensureMediaHandler();
     svc.KeepAlive.onMediaAction = _onMediaAction;
     svc.KeepAlive.onMediaSeek = _onMediaSeek;
@@ -71,6 +71,29 @@ class _PlayerPanelState extends State<PlayerPanel> {
 
   void _onMediaSeek(Duration position) {
     _video?.seekTo(position);
+  }
+
+  /// Skip [seconds] (negative = rewind), clamped to the video bounds.
+  Future<void> _skip(int seconds) async {
+    final video = _video;
+    final value = video?.value;
+    if (video == null || value == null || !value.isInitialized) return;
+    var target = value.position + Duration(seconds: seconds);
+    if (target < Duration.zero) target = Duration.zero;
+    if (target > value.duration) target = value.duration;
+    await video.seekTo(target);
+    // Keep the lock-screen scrubber in sync immediately after a jump.
+    if (_serviceStarted) _pushPlaybackState(value.isPlaying);
+  }
+
+  void _openOnYoutube() {
+    final uri = Uri.parse('https://www.youtube.com/watch?v=${widget.item.id}');
+    launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  /// Keep the screen awake only while the video is actually playing.
+  void _applyWakelock(bool playing) {
+    WakelockPlus.toggle(enable: playing);
   }
 
   Future<void> _init() async {
@@ -144,6 +167,9 @@ class _PlayerPanelState extends State<PlayerPanel> {
   /// un-pause; it stops when the panel closes.
   void _onPlayStateChanged() {
     final playing = _video?.value.isPlaying ?? false;
+    // Screen-awake tracks playback exactly (also covers the app-open case,
+    // since the panel is only mounted while the app is foregrounded).
+    _applyWakelock(playing);
     if (!_serviceStarted && !playing) return;
     if (_serviceStarted && playing == _lastReportedPlaying) return;
     _serviceStarted = true;
@@ -239,6 +265,11 @@ class _PlayerPanelState extends State<PlayerPanel> {
                   ),
                 ),
                 IconButton(
+                  tooltip: 'Open on YouTube',
+                  icon: const Icon(Icons.open_in_new, size: 20),
+                  onPressed: _openOnYoutube,
+                ),
+                IconButton(
                   tooltip: 'Close player',
                   icon: const Icon(Icons.close, size: 20),
                   onPressed: widget.onClose,
@@ -246,7 +277,53 @@ class _PlayerPanelState extends State<PlayerPanel> {
               ],
             ),
           ),
+          if (_error == null) _buildSkipRow(scheme),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSkipRow(ColorScheme scheme) {
+    final enabled = _video?.value.isInitialized ?? false;
+    return Container(
+      color: scheme.surfaceContainerHigh,
+      padding: const EdgeInsets.only(bottom: 8, top: 2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          _SkipButton(label: '-60', onTap: enabled ? () => _skip(-60) : null),
+          _SkipButton(label: '-30', onTap: enabled ? () => _skip(-30) : null),
+          _SkipButton(label: '+30', onTap: enabled ? () => _skip(30) : null),
+          _SkipButton(label: '+60', onTap: enabled ? () => _skip(60) : null),
+        ],
+      ),
+    );
+  }
+}
+
+/// A compact skip control (e.g. "-30", "+60"), styled like a chip.
+class _SkipButton extends StatelessWidget {
+  const _SkipButton({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final rewind = label.startsWith('-');
+    return TextButton.icon(
+      onPressed: onTap,
+      icon: Icon(
+        rewind ? Icons.replay : Icons.forward,
+        size: 16,
+      ),
+      label: Text('${label.substring(1)}s'),
+      style: TextButton.styleFrom(
+        foregroundColor: scheme.onSurface,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        minimumSize: const Size(0, 36),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
     );
   }

@@ -16,8 +16,11 @@ evicted automatically, files included).
 3. **Watch immediately**: while it downloads, tap the item to stream a preview right away
    (~360p over the network); once the download finishes, playback uses the local 1080p file.
 4. Videos play in an inline docked player (YouTube-style) with a fullscreen button,
-   speed controls, and seek. ugo-yt **remembers where you stopped** and resumes there —
-   even across app restarts and the preview→local switch.
+   speed controls, seek, and **-60/-30/+30/+60s skip buttons**. ugo-yt **remembers where
+   you stopped** and resumes there — even across app restarts and the preview→local switch.
+   The screen stays awake while a video is playing (and only then).
+5. **Open on YouTube**: the player's ↗ button and each item's ⋮ menu open the original
+   video in the YouTube app / browser.
 
 You can also paste a link manually with the **⊕ link** button in the app bar.
 

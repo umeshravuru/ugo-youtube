@@ -19,12 +19,11 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
-import io.flutter.plugin.common.MethodChannel
 
 /** Routes media-session actions (lock screen, headsets) back into Dart. */
 object PlaybackBridge {
     @Volatile
-    var channel: MethodChannel? = null
+    var channel: io.flutter.plugin.common.MethodChannel? = null
     private val main = Handler(Looper.getMainLooper())
 
     fun sendAction(action: String) {
@@ -41,6 +40,11 @@ object PlaybackBridge {
  * MediaSession + MediaStyle notification that puts play/pause (and a seek
  * bar) on the lock screen, and keeps the process alive so audio continues
  * when the app is minimized or the screen is off.
+ *
+ * Lock-screen actions flip the visible play/pause state on the NATIVE side
+ * immediately (so the control responds even if the Flutter engine is briefly
+ * frozen) and are then forwarded to Dart, which drives the actual player and
+ * pushes back the authoritative state.
  */
 class PlaybackService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
@@ -62,18 +66,38 @@ class PlaybackService : Service() {
             .apply { setReferenceCounted(false) }
         session = MediaSessionCompat(this, "ugoyt-playback").apply {
             setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() = PlaybackBridge.sendAction("play")
-                override fun onPause() = PlaybackBridge.sendAction("pause")
-                override fun onSeekTo(pos: Long) = PlaybackBridge.sendSeek(pos)
+                override fun onPlay() = onTransport(wantPlaying = true)
+                override fun onPause() = onTransport(wantPlaying = false)
+                override fun onStop() = onTransport(wantPlaying = false)
+                override fun onSeekTo(pos: Long) {
+                    positionMs = pos
+                    refreshSessionAndNotification()
+                    PlaybackBridge.sendSeek(pos)
+                }
             })
             isActive = true
         }
     }
 
+    /** A play/pause request from the lock screen, headset, or notification. */
+    private fun onTransport(wantPlaying: Boolean) {
+        // Optimistically flip native state so the lock-screen control updates
+        // instantly, then tell Dart to actually play/pause the video.
+        playing = wantPlaying
+        refreshSessionAndNotification()
+        PlaybackBridge.sendAction(if (wantPlaying) "play" else "pause")
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_TOGGLE) {
-            PlaybackBridge.sendAction("playPause")
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_PLAY -> {
+                onTransport(wantPlaying = true)
+                return START_NOT_STICKY
+            }
+            ACTION_PAUSE -> {
+                onTransport(wantPlaying = false)
+                return START_NOT_STICKY
+            }
         }
         applyUpdate(
             intent?.getStringExtra(EXTRA_TITLE) ?: title,
@@ -109,8 +133,8 @@ class PlaybackService : Service() {
             wakeLock?.let { if (it.isHeld) it.release() }
         }
 
-        updateSession()
         ensureChannel(this)
+        updateSession()
         val notification = build()
         if (Build.VERSION.SDK_INT >= 29) {
             ServiceCompat.startForeground(
@@ -120,6 +144,13 @@ class PlaybackService : Service() {
         } else {
             startForeground(NOTIF_ID, notification)
         }
+    }
+
+    /** Re-render session + notification without touching foreground state. */
+    private fun refreshSessionAndNotification() {
+        updateSession()
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.notify(NOTIF_ID, build())
     }
 
     private fun updateSession() {
@@ -145,6 +176,7 @@ class PlaybackService : Service() {
                     PlaybackStateCompat.ACTION_PLAY
                         or PlaybackStateCompat.ACTION_PAUSE
                         or PlaybackStateCompat.ACTION_PLAY_PAUSE
+                        or PlaybackStateCompat.ACTION_STOP
                         or PlaybackStateCompat.ACTION_SEEK_TO
                 )
                 .setState(
@@ -165,21 +197,25 @@ class PlaybackService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
         }
-        val toggleIntent = PendingIntent.getService(
-            this, 2,
-            Intent(this, PlaybackService::class.java).setAction(ACTION_TOGGLE),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        // Distinct play and pause intents so the OS media controller maps the
+        // button unambiguously (a single toggle intent can go stale when the
+        // notification isn't rebuilt between taps).
+        val action = if (playing) {
+            NotificationCompat.Action(
+                android.R.drawable.ic_media_pause, "Pause",
+                servicePendingIntent(ACTION_PAUSE, 2),
+            )
+        } else {
+            NotificationCompat.Action(
+                android.R.drawable.ic_media_play, "Play",
+                servicePendingIntent(ACTION_PLAY, 3),
+            )
+        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(title)
             .setContentText(if (playing) "Playing" else "Paused")
-            .addAction(
-                if (playing) android.R.drawable.ic_media_pause
-                else android.R.drawable.ic_media_play,
-                if (playing) "Pause" else "Play",
-                toggleIntent,
-            )
+            .addAction(action)
             .setStyle(
                 androidx.media.app.NotificationCompat.MediaStyle()
                     .setMediaSession(session?.sessionToken)
@@ -190,6 +226,14 @@ class PlaybackService : Service() {
             .setOnlyAlertOnce(true)
             .setContentIntent(contentIntent)
             .build()
+    }
+
+    private fun servicePendingIntent(action: String, requestCode: Int): PendingIntent {
+        return PendingIntent.getService(
+            this, requestCode,
+            Intent(this, PlaybackService::class.java).setAction(action),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
     }
 
     override fun onDestroy() {
@@ -204,7 +248,8 @@ class PlaybackService : Service() {
     companion object {
         private const val CHANNEL_ID = "playback"
         private const val NOTIF_ID = 2
-        private const val ACTION_TOGGLE = "com.ugoyt.ugo_yt.TOGGLE_PLAYBACK"
+        private const val ACTION_PLAY = "com.ugoyt.ugo_yt.PLAY"
+        private const val ACTION_PAUSE = "com.ugoyt.ugo_yt.PAUSE"
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_PLAYING = "playing"
         private const val EXTRA_POSITION = "positionMs"

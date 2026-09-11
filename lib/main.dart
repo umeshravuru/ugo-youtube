@@ -4,12 +4,18 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'services/downloader.dart';
+import 'services/keepalive.dart' as svc;
 import 'services/library_store.dart';
 import 'services/share_handler.dart';
 import 'ui/library_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Register the native->Dart media-action handler once, at startup, so
+  // lock-screen play/pause reaches Dart regardless of the player panel's
+  // lifecycle.
+  svc.KeepAlive.ensureMediaHandler();
 
   final baseDir = await _resolveBaseDir();
   final mediaDir = Directory('${baseDir.path}/videos');

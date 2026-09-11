@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/video_item.dart';
 import '../services/downloader.dart';
@@ -351,12 +352,22 @@ class _Menu extends StatelessWidget {
     return PopupMenuButton<String>(
       icon: const Icon(Icons.more_vert, size: 20),
       onSelected: (value) {
-        if (value == 'delete') downloader.cancelAndRemove(item.id);
-        if (value == 'retry') downloader.retry(item.id);
+        switch (value) {
+          case 'delete':
+            downloader.cancelAndRemove(item.id);
+          case 'retry':
+            downloader.retry(item.id);
+          case 'youtube':
+            launchUrl(
+              Uri.parse('https://www.youtube.com/watch?v=${item.id}'),
+              mode: LaunchMode.externalApplication,
+            );
+        }
       },
       itemBuilder: (context) => [
         if (item.status == VideoStatus.failed)
           const PopupMenuItem(value: 'retry', child: Text('Retry')),
+        const PopupMenuItem(value: 'youtube', child: Text('Open on YouTube')),
         PopupMenuItem(
           value: 'delete',
           child: Text(item.status.isActive ? 'Cancel download' : 'Delete'),
